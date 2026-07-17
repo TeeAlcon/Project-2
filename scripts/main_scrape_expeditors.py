@@ -2,7 +2,8 @@ import asyncio
 from pathlib import Path
 import os
 import pandas as pd
-from combine_scrape_pdf import combine_saved_pdfs 
+from scripts.utils.combine_scrape_pdf import combine_saved_pdfs 
+from scripts.utils.login_interface import get_credentials
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 
@@ -16,6 +17,50 @@ EDGE_USER_DATA_DIR = (
     / "User Data"
 )
 
+async def login(page, username, password):
+    await page.goto(URL)
+
+    await page.wait_for_load_state("domcontentloaded")
+
+    email_box = page.get_by_role("textbox", name="Email")
+    password_box = page.get_by_role("textbox", name="Password")
+
+    await email_box.wait_for(timeout=10000)
+    await password_box.wait_for(timeout=10000)
+
+    await email_box.fill(username)
+    await password_box.fill(password)
+
+    await page.get_by_role("button", name="Sign In").click()
+
+async def determine_auth_state(page):
+    try:
+        await page.wait_for_load_state("domcontentloaded")
+
+        await asyncio.wait_for(
+            asyncio.gather(
+                page.locator("#track-your-shipment-widget").wait_for(
+                    state="visible"
+                )
+            ),
+            timeout=5,
+        )
+
+        return "logged_in"
+
+    except:
+        return "login_required"
+    
+async def fail_log_in(page) -> bool:
+    try:
+        await page.get_by_text(
+            "Wrong email or password."
+        ).wait_for(state="visible", timeout=3000)
+
+        return True
+
+    except PlaywrightTimeoutError:
+        return False
 
 async def save_pdfs_from_view_click(page, output_dir: Path, quiet_time: float = 1.0):
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -132,7 +177,6 @@ async def playwright_automation(page, itns):
 
         if saved_pdfs:
             combine_saved_pdfs(saved_pdfs, out / f"{itn}.pdf")
-        #await page.pause()
 
 def read_itns_from_csv():
     csv_path = input("Paste the full path to the CSV file: ").strip().strip('"')
@@ -158,8 +202,8 @@ def read_itns_from_csv():
     return [itn for itn in itns if itn]
 
 async def run_playwright(itns):
-    async with async_playwright() as p:
-        context = await p.chromium.launch_persistent_context(
+        async with async_playwright() as p:
+        #context = await p.chromium.launch_persistent_context(
             user_data_dir=EDGE_USER_DATA_DIR,
             channel="msedge",
             headless=False,
@@ -167,9 +211,16 @@ async def run_playwright(itns):
             accept_downloads=True,
             no_viewport=False,
             permissions=["clipboard-read", "clipboard-write"],
-            #ignore_https_errors=True,
+            #ignore_https_errors=True,)   # run launch_persistent_context to not log in
+        
+        browser = await p.chromium.launch(
+            channel="msedge",
+            headless=False # run headless=True if user don't want browser-popup
         )
-
+        context = await browser.new_context(
+            accept_downloads=True,
+            permissions=["clipboard-read", "clipboard-write"],
+        )
         try:
             pages = context.pages
             if pages:
@@ -178,16 +229,35 @@ async def run_playwright(itns):
                     await extra_page.close()
             else:
                 page = await context.new_page()
-
+            
             await page.goto(URL)
-            await playwright_automation(page, itns)
+            state = await determine_auth_state(page)
+            if state == "logged_in":
+                print("Already logged in.")
+            else:
+                error_message = None
+                while True:
+                    username, password =  get_credentials(error_message)
+                    if not username or not password:
+                        raise Exception("Login cancelled by user")
 
+                    await login(page, username, password)
+
+                    if await fail_log_in(page):
+                        error_message = "Wrong email or password. Please try again."
+                        continue
+                    break
+
+            await page.get_by_role("button", name="Got it!").click()
+            await page.locator(".pi").first.click()
+        
         finally:
             await context.close()
 
-def test():
+
+def main():
     itns = read_itns_from_csv()
     asyncio.run(run_playwright(itns))
 
 if __name__ == "__main__":
-    test()
+    main()
